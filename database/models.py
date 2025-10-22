@@ -103,7 +103,7 @@ class PriceHistory(Base):
     product = relationship('Product', back_populates='price_history')
     
     __table_args__ = (
-        Index('idx_asin_date', 'asin', 'date'),
+        Index('idx_pricehistory_asin_date', 'asin', 'date'),
     )
 
 class Review(Base):
