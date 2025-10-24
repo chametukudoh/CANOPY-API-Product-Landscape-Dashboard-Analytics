@@ -20,33 +20,43 @@ class DataTransformer:
         product = self.session.query(Product).filter(
             Product.asin == result['asin']
         ).first()
+        price_value = result.get('price')
+        price_currency = result.get('currency', 'USD')
+        rating = result.get('rating')
+        review_count = result.get('review_count')
         
         if not product:
             product = Product(
                 asin=result['asin'],
-                title=result['title'],
-                current_price=result['price'],
-                current_rating=result['rating'],
-                current_review_count=result['review_count']
+                title=result.get('title'),
+                current_price=price_value,
+                current_rating=rating,
+                current_review_count=review_count
             )
             self.session.add(product)
             logger.info(f"Created new product: {result['asin']}")
         else:
             # Update current metrics
-            product.current_price = result['price']
-            product.current_rating = result['rating']
-            product.current_review_count = result['review_count']
+            if price_value is not None:
+                product.current_price = price_value
+            if rating is not None:
+                product.current_rating = rating
+            if review_count is not None:
+                product.current_review_count = review_count
             product.last_updated = datetime.utcnow()
             logger.debug(f"Updated product: {result['asin']}")
         
         # Add price history entry
-        price_entry = PriceHistory(
-            asin=result['asin'],
-            date=datetime.utcnow(),
-            price=result['price'],
-            currency=result.get('currency', 'USD')
-        )
-        self.session.add(price_entry)
+        if price_value is not None:
+            price_entry = PriceHistory(
+                asin=result['asin'],
+                date=datetime.utcnow(),
+                price=price_value,
+                currency=price_currency or 'USD'
+            )
+            self.session.add(price_entry)
+        else:
+            logger.debug(f"Skipping price history for {result['asin']} (no price provided)")
         
         return product
     
@@ -91,8 +101,8 @@ class DataTransformer:
             return None
         
         # Calculate metrics
-        prices = [r.price for r in all_results if r.price]
-        ratings = [r.rating for r in all_results if r.rating]
+        prices = [r.price for r in all_results if r.price is not None]
+        ratings = [r.rating for r in all_results if r.rating is not None]
         sponsored = sum(1 for r in all_results if r.is_sponsored)
         organic = sum(1 for r in all_results if not r.is_sponsored)
         
