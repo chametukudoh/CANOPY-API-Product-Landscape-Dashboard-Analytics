@@ -1,8 +1,10 @@
-import requests
-import time
-from typing import Dict, List, Optional
-from datetime import datetime
 import logging
+import re
+import time
+from datetime import datetime
+from typing import Dict, List, Optional
+
+import requests
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -39,6 +41,31 @@ class CanopyAPI:
         except requests.exceptions.RequestException as e:
             logger.error(f"Request error occurred: {e}")
             raise
+
+    @staticmethod
+    def _normalize_price(price_info: Optional[Dict]) -> tuple[Optional[float], Optional[str], Optional[str]]:
+        """Convert Canopy price payload into (value, currency, display)."""
+        if not price_info:
+            return None, None, None
+        
+        value = price_info.get("value")
+        currency = price_info.get("currency")
+        display = price_info.get("display")
+        
+        if value is None and display:
+            match = re.search(r"[-+]?[0-9]*[\\.,]?[0-9]+", display)
+            if match:
+                try:
+                    value = float(match.group(0).replace(",", ""))
+                except ValueError:
+                    value = None
+        elif value is not None:
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                value = None
+        
+        return value, currency, display
             
     def search_products(self, keyword: str, marketplace: str = "US", 
                        page: int = 1) -> Dict:
@@ -141,11 +168,13 @@ class CanopyAPI:
                 if results:
                     for idx, result in enumerate(results, 1):
                         price_info = result.get("price") or {}
+                        price_value, price_currency, price_display = self._normalize_price(price_info)
                         snapshot["results"].append({
                             "asin": result.get("asin"),
                             "title": result.get("title"),
-                            "price": price_info.get("value") or price_info.get("display"),
-                            "currency": price_info.get("currency"),
+                            "price": price_value,
+                            "price_display": price_display,
+                            "currency": price_currency or 'USD',
                             "rating": result.get("rating"),
                             "review_count": result.get("ratingsTotal"),
                             "position": idx,
