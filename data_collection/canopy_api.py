@@ -10,11 +10,12 @@ logger = logging.getLogger(__name__)
 class CanopyAPI:
     """Wrapper for Canopy API endpoints"""
     
-    def __init__(self, api_key: str, base_url: str = "https://api.canopyapi.co"):
+    def __init__(self, api_key: str, base_url: str = "https://rest.canopyapi.co/api/amazon"):
         self.api_key = api_key
         self.base_url = base_url
         self.headers = {
             "Authorization": f"Bearer {api_key}",
+            "API-KEY": api_key,
             "Content-Type": "application/json"
         }
         self.rate_limit_delay = 1  # seconds between requests
@@ -29,7 +30,11 @@ class CanopyAPI:
             response.raise_for_status()
             return response.json()
         except requests.exceptions.HTTPError as e:
-            logger.error(f"HTTP error occurred: {e}")
+            status = getattr(e.response, "status_code", "unknown")
+            body = getattr(e.response, "text", "")
+            logger.error(f"HTTP error occurred ({status}): {e}")
+            if body:
+                logger.debug(f"Response body: {body}")
             raise
         except requests.exceptions.RequestException as e:
             logger.error(f"Request error occurred: {e}")
@@ -50,13 +55,21 @@ class CanopyAPI:
         """
         endpoint = "search"
         params = {
-            "keyword": keyword,
+            "searchTerm": keyword,
             "marketplace": marketplace,
             "page": page
         }
         
         logger.info(f"Searching for keyword: {keyword}")
-        return self._make_request(endpoint, params)
+        payload = self._make_request(endpoint, params)
+        search_data = (payload or {}).get("data", {}).get("amazonProductSearchResults", {})
+        product_results = search_data.get("productResults") or {}
+        
+        return {
+            "results": product_results.get("results") or [],
+            "page_info": product_results.get("pageInfo"),
+            "refinements": search_data.get("availableRefinements") or []
+        }
     
     def get_product_details(self, asin: str, marketplace: str = "US") -> Dict:
         """
@@ -88,7 +101,7 @@ class CanopyAPI:
         Returns:
             Dict containing reviews with ratings, dates, text
         """
-        endpoint = f"reviews/{asin}"
+        endpoint = f"product/{asin}/reviews"
         params = {
             "marketplace": marketplace,
             "page": page
@@ -124,18 +137,21 @@ class CanopyAPI:
                 }
                 
                 # Extract key metrics from search results
-                if "results" in search_results:
-                    for idx, result in enumerate(search_results["results"], 1):
+                results = search_results.get("results", []) if isinstance(search_results, dict) else []
+                if results:
+                    for idx, result in enumerate(results, 1):
+                        price_info = result.get("price") or {}
                         snapshot["results"].append({
                             "asin": result.get("asin"),
                             "title": result.get("title"),
-                            "price": result.get("price"),
-                            "currency": result.get("currency"),
+                            "price": price_info.get("value") or price_info.get("display"),
+                            "currency": price_info.get("currency"),
                             "rating": result.get("rating"),
-                            "review_count": result.get("review_count"),
+                            "review_count": result.get("ratingsTotal"),
                             "position": idx,
-                            "is_sponsored": result.get("is_sponsored", False),
-                            "image_url": result.get("image_url")
+                            "is_sponsored": result.get("sponsored", False),
+                            "image_url": result.get("mainImageUrl"),
+                            "product_url": result.get("url")
                         })
                 
                 snapshots.append(snapshot)
