@@ -1,10 +1,19 @@
 """Data transformation and processing logic"""
 import logging
 from datetime import datetime, timedelta
+from typing import List, Optional, Tuple
+
 from sqlalchemy import func
+
 from database.models import (
-    SerpSnapshot, SerpResult, Product, PriceHistory, 
-    DailyMetric, Keyword
+    SerpSnapshot,
+    SerpResult,
+    Product,
+    PriceHistory,
+    DailyMetric,
+    Keyword,
+    Review,
+    Seller,
 )
 
 logger = logging.getLogger(__name__)
@@ -15,50 +24,212 @@ class DataTransformer:
     def __init__(self, db_session):
         self.session = db_session
     
-    def update_product_from_serp(self, result: dict) -> Product:
-        """Update or create product record from SERP result"""
-        product = self.session.query(Product).filter(
-            Product.asin == result['asin']
-        ).first()
-        price_value = result.get('price')
-        price_currency = result.get('currency', 'USD')
-        rating = result.get('rating')
-        review_count = result.get('review_count')
-        
+    def update_product_from_serp(self, result: dict) -> Tuple[Product, bool]:
+        """Update or create product record from SERP result.
+
+        Returns:
+            Tuple[Product, bool]: product instance and a flag indicating if it was newly created.
+        """
+        product = (
+            self.session.query(Product)
+            .filter(Product.asin == result["asin"])
+            .first()
+        )
+        price_value = result.get("price")
+        price_currency = result.get("currency", "USD")
+        rating = result.get("rating")
+        review_count = result.get("review_count")
+
+        created = False
         if not product:
             product = Product(
-                asin=result['asin'],
-                title=result.get('title'),
+                asin=result["asin"],
+                title=result.get("title"),
                 current_price=price_value,
                 current_rating=rating,
-                current_review_count=review_count
+                current_review_count=review_count,
             )
             self.session.add(product)
+            created = True
             logger.info(f"Created new product: {result['asin']}")
         else:
-            # Update current metrics
             if price_value is not None:
                 product.current_price = price_value
             if rating is not None:
                 product.current_rating = rating
             if review_count is not None:
                 product.current_review_count = review_count
+            if not product.title and result.get("title"):
+                product.title = result["title"]
             product.last_updated = datetime.utcnow()
             logger.debug(f"Updated product: {result['asin']}")
-        
-        # Add price history entry
+
         if price_value is not None:
             price_entry = PriceHistory(
-                asin=result['asin'],
+                asin=result["asin"],
                 date=datetime.utcnow(),
                 price=price_value,
-                currency=price_currency or 'USD'
+                currency=price_currency or "USD",
             )
             self.session.add(price_entry)
         else:
-            logger.debug(f"Skipping price history for {result['asin']} (no price provided)")
-        
-        return product
+            logger.debug(
+                "Skipping price history for %s (no price provided)", result["asin"]
+            )
+
+        return product, created
+
+    def enrich_product_details(
+        self,
+        product: Product,
+        enrichment: Optional[dict],
+        marketplace: Optional[str],
+    ) -> None:
+        """Apply enrichment payload to product, seller, and review tables."""
+        if not enrichment:
+            return
+
+        brand = enrichment.get("brand")
+        category = enrichment.get("category")
+        subcategory = enrichment.get("subcategory")
+        enrichment_rating = enrichment.get("rating")
+        enrichment_review_count = enrichment.get("review_count")
+        price_info = enrichment.get("price")
+
+        if brand:
+            product.brand = brand
+        if category:
+            product.category = category
+        if subcategory:
+            product.subcategory = subcategory
+
+        if isinstance(price_info, dict):
+            price_value = price_info.get("value")
+            if price_value is None and price_info.get("display"):
+                display = price_info["display"].replace(",", "")
+                digits = "".join(ch for ch in display if ch.isdigit() or ch == ".")
+                try:
+                    price_value = float(digits)
+                except (TypeError, ValueError):
+                    price_value = None
+            if price_value is not None:
+                product.current_price = price_value
+
+        if enrichment_rating is not None:
+            try:
+                product.current_rating = float(enrichment_rating)
+            except (TypeError, ValueError):
+                logger.debug(
+                    "Unable to coerce rating for %s from enrichment payload",
+                    product.asin,
+                )
+
+        if enrichment_review_count is not None:
+            try:
+                product.current_review_count = int(enrichment_review_count)
+            except (TypeError, ValueError):
+                logger.debug(
+                    "Unable to coerce review count for %s from enrichment payload",
+                    product.asin,
+                )
+
+        if marketplace and not product.marketplace:
+            product.marketplace = marketplace
+
+        product.last_updated = datetime.utcnow()
+
+        if brand:
+            self._upsert_seller_metrics(brand, marketplace or product.marketplace)
+
+        self._upsert_reviews(product.asin, enrichment.get("recent_reviews", []))
+
+    def _upsert_seller_metrics(self, brand: str, marketplace: Optional[str]) -> None:
+        seller = (
+            self.session.query(Seller)
+            .filter(Seller.brand_name == brand)
+            .first()
+        )
+
+        if not seller:
+            seller = Seller(
+                brand_name=brand,
+                marketplace=marketplace or "US",
+                first_seen=datetime.utcnow(),
+            )
+            self.session.add(seller)
+        else:
+            if marketplace and not seller.marketplace:
+                seller.marketplace = marketplace
+
+        product_q = self.session.query(Product).filter(Product.brand == brand)
+        seller.product_count = product_q.count()
+
+        avg_rating = (
+            product_q.with_entities(func.avg(Product.current_rating))
+            .filter(Product.current_rating.isnot(None))
+            .scalar()
+        )
+        if avg_rating is not None:
+            seller.avg_rating = float(avg_rating)
+
+        total_reviews = (
+            product_q.with_entities(func.sum(Product.current_review_count))
+            .filter(Product.current_review_count.isnot(None))
+            .scalar()
+        )
+        if total_reviews is not None:
+            seller.total_reviews = int(total_reviews)
+
+    def _upsert_reviews(self, asin: str, recent_reviews: List[dict]) -> None:
+        for review in recent_reviews or []:
+            review_id = review.get("review_id") or review.get("id")
+            rating = review.get("rating")
+
+            if not review_id or rating is None:
+                continue
+
+            exists = (
+                self.session.query(Review)
+                .filter(Review.review_id == review_id)
+                .first()
+            )
+            if exists:
+                continue
+
+            try:
+                rating_value = int(float(rating))
+            except (TypeError, ValueError):
+                continue
+
+            review_date_str = review.get("review_date") or review.get("date")
+            review_date = None
+            if review_date_str:
+                review_date = self._parse_datetime(review_date_str)
+
+            new_review = Review(
+                asin=asin,
+                review_id=review_id,
+                rating=rating_value,
+                title=review.get("title"),
+                text=review.get("text") or review.get("body"),
+                verified_purchase=bool(review.get("verified_purchase")),
+                review_date=review_date,
+                helpful_votes=review.get("helpful_votes") or 0,
+            )
+            self.session.add(new_review)
+
+    @staticmethod
+    def _parse_datetime(value: str) -> Optional[datetime]:
+        try:
+            if value.endswith("Z"):
+                value = value[:-1] + "+00:00"
+            return datetime.fromisoformat(value)
+        except ValueError:
+            try:
+                return datetime.strptime(value, "%Y-%m-%d")
+            except ValueError:
+                logger.debug("Unable to parse review date: %s", value)
+                return None
     
     def compute_daily_metrics(self, date: datetime = None) -> list:
         """Compute aggregated daily metrics for all keywords"""
