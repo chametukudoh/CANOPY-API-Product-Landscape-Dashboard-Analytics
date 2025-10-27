@@ -1,11 +1,18 @@
-import pandas as pd
-from datetime import datetime, timedelta
-from sqlalchemy import func
-from database.models import (
-    DatabaseManager, Keyword, SerpSnapshot, SerpResult, 
-    Product, PriceHistory, DailyMetric
-)
 import os
+from datetime import datetime, timedelta
+
+import pandas as pd
+from sqlalchemy import Integer, cast, func
+
+from database.models import (
+    DailyMetric,
+    DatabaseManager,
+    Keyword,
+    PriceHistory,
+    Product,
+    SerpResult,
+    SerpSnapshot,
+)
 
 class PowerBIExporter:
     """Export data for Power BI consumption"""
@@ -195,8 +202,7 @@ class PowerBIExporter:
                 func.count(SerpResult.id).label('appearances'),
                 func.avg(SerpResult.price).label('avg_price'),
                 func.avg(SerpResult.rating).label('avg_rating'),
-                func.sum(func.cast(SerpResult.is_sponsored, 
-                        type_=func.INTEGER)).label('sponsored_count')
+                func.sum(cast(SerpResult.is_sponsored, Integer)).label('sponsored_count')
             ).join(
                 SerpSnapshot, SerpResult.snapshot_id == SerpSnapshot.id
             ).join(
