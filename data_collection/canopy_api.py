@@ -109,8 +109,8 @@ class CanopyAPI:
         Returns:
             Dict containing product details including brand, category, etc.
         """
-        endpoint = f"product/{asin}"
-        params = {"marketplace": marketplace}
+        endpoint = "product"
+        params = {"asin": asin, "marketplace": marketplace}
         
         logger.info(f"Fetching product details for ASIN: {asin}")
         return self._make_request(endpoint, params)
@@ -128,8 +128,9 @@ class CanopyAPI:
         Returns:
             Dict containing reviews with ratings, dates, text
         """
-        endpoint = f"product/{asin}/reviews"
+        endpoint = "product/reviews"
         params = {
+            "asin": asin,
             "marketplace": marketplace,
             "page": page
         }
@@ -211,7 +212,8 @@ class CanopyAPI:
         
         try:
             # Get product details
-            product = self.get_product_details(asin, marketplace)
+            product_payload = self.get_product_details(asin, marketplace)
+            product = (product_payload or {}).get("data", {}).get("amazonProduct", {})
             enriched_data.update({
                 "brand": product.get("brand"),
                 "category": product.get("category"),
@@ -219,13 +221,15 @@ class CanopyAPI:
                 "title": product.get("title"),
                 "price": product.get("price"),
                 "rating": product.get("rating"),
-                "review_count": product.get("review_count")
+                "review_count": product.get("ratingsTotal") or product.get("reviewCount")
             })
             
             # Get review sample
-            reviews = self.get_product_reviews(asin, marketplace)
-            if "reviews" in reviews:
-                enriched_data["recent_reviews"] = reviews["reviews"][:5]  # Top 5
+            reviews_payload = self.get_product_reviews(asin, marketplace)
+            reviews = (reviews_payload or {}).get("data", {}).get("amazonProduct", {})
+            top_reviews = reviews.get("topReviews") or reviews.get("reviews")
+            if top_reviews:
+                enriched_data["recent_reviews"] = top_reviews[:5]  # Top 5
                 
         except Exception as e:
             logger.error(f"Failed to enrich ASIN {asin}: {e}")
